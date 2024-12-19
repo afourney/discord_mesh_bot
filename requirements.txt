@@ -1,0 +1,3 @@
+meshtastic
+paho-mqtt
+cryptography
