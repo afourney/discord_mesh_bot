@@ -38,6 +38,9 @@ def on_message(mosq, obj, msg):
         print(f"*** ServiceEnvelope: {str(e)}")
         return
 
+    if mp.to != 4294967295: # Broadcast
+        print("Ignoring DM")
+        return
 
     if mp.HasField("encrypted") and not mp.HasField("decoded"):
         if se.channel_id in keymap:
