@@ -1,5 +1,3 @@
-source .venv/bin/activate
-
 if [ -f "webhooks.bash" ]; then
   source webhooks.bash
 fi
