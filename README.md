@@ -1,10 +1,10 @@
 # discord\_mesh\_bot
 Simple script for relaying meshtastic messages onto Discord.
 
-To get going, you should create a bash script that sets the appropriate environment variables for the webhooks:
+To get going, you should create a `webhooks.bash` script that sets the appropriate environment variables for the webhooks:
 
 ```bash
-# Webhooks
+# File: webhooks.bash
 export DISCORD_WEBHOOK='https://discord.com/api/webhooks/...'
 export TEST_WEBHOOK='https://discord.com/api/webhooks/...'
 ```
