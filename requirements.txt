@@ -1,3 +1,5 @@
 meshtastic
 paho-mqtt
 cryptography
+requests
+pyyaml

@@ -3,7 +3,7 @@ mqtt:
   address: mqtt.davekeogh.com
   port: 1883
   user: meshdev
-  password: large4cats  
+  password: large4cats
   subscription: msh/US/2/e/#
   map_url_prefix: https://meshtastic.davekeogh.com/?node_id= # Node ID will be appended
 
@@ -27,5 +27,5 @@ channels:
 
 # Catch all settings
 catch_all:
-    key: AQ==
-    webhook: ${DISCORD_WEBHOOK}
+  key: AQ==
+  webhook: ${DISCORD_WEBHOOK}

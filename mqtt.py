@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
-
-import paho.mqtt.client as paho
-import base64
-import requests
+import string
 import sqlite3
 import time
-import json
-import yaml
-import string
-import os
 import warnings
 
-from datetime import datetime
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
-from meshtastic import BROADCAST_NUM
+import base64
+import json
+import os
+import requests
+import yaml
 
-DEFAULT_KEY = "1PG7OiApB1nwvP+rz05pAQ==" # AQ==, expanded
-BROADCAST_ADDR = 4294967295 # 'to:' address, for broadcasts
+import paho.mqtt.client as paho
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from meshtastic import BROADCAST_NUM
+from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
+
+DEFAULT_KEY = "1PG7OiApB1nwvP+rz05pAQ=="  # AQ==, expanded
 
 CONFIG = {}
 
 hist = {}
 conn = None
+
 
 def on_message(mosq, obj, msg):
     se = mqtt_pb2.ServiceEnvelope()
@@ -41,20 +40,19 @@ def on_message(mosq, obj, msg):
     if mp.HasField("encrypted") and not mp.HasField("decoded"):
         decode_encrypted(mp, channel_config.get("key", DEFAULT_KEY))
 
-    print ("")
-    print ("Service Envelope:")
-    print ("="*80)
-    print (se)
+    print("")
+    print("Service Envelope:")
+    print("=" * 80)
+    print(se)
 
     if not mp.HasField("decoded"):
         # Decoding failed.
-        return 
+        return
 
     if mp.decoded.portnum == portnums_pb2.TEXT_MESSAGE_APP:
-        
-        if mp.to != BROADCAST_ADDR: # Broadcast
+        if mp.to != BROADCAST_NUM:  # Broadcast
             return
-    
+
         if "webhook" not in channel_config:
             # Nowhere to post
             warnings.warn("No webhook configured for channel '" + se.channel_id + "'")
@@ -62,12 +60,12 @@ def on_message(mosq, obj, msg):
 
         try:
             text_payload = mp.decoded.payload.decode("utf-8")
-            _from = "!"+ "{0:#0{1}x}".format(getattr(mp, 'from'),8)[2:]
+            _from = "!" + "{0:#0{1}x}".format(getattr(mp, "from"), 8)[2:]
 
             _gateway = se.gateway_id
             _channel_id = se.channel_id
             _topic = msg.topic
-            _is_self_gate = _from == _gateway 
+            _is_self_gate = _from == _gateway
 
             _node_info = node_lookup(conn, _from)
             _gateway_info = node_lookup(conn, _gateway)
@@ -79,24 +77,25 @@ def on_message(mosq, obj, msg):
             if _gateway_info is not None:
                 _gateway = f"{_gateway_info['long_name']}"
 
-            now = datetime.now()
-            iso_now = now.isoformat()
-
             discord_msg = {
-                "embeds": [{
-                    "description": "```" + text_payload.replace("`", "'") + " ```",
-                    #"timestamp": iso_now,
-                    "author": {
-                        "name": _from,
-                    },
-                    "footer": {
-                        "text": f"{_channel_id}",
-                    },
-                 }]
-            }   
+                "embeds": [
+                    {
+                        "description": "```" + text_payload.replace("`", "'") + " ```",
+                        # "timestamp": datetime.now().isoformat(),
+                        "author": {
+                            "name": _from,
+                        },
+                        "footer": {
+                            "text": f"{_channel_id}",
+                        },
+                    }
+                ]
+            }
 
             if "map_url_prefix" in CONFIG["mqtt"]:
-                discord_msg["embeds"][0]["author"]["url"] = CONFIG["mqtt"]["map_url_prefix"] + str(getattr(mp, 'from'))
+                discord_msg["embeds"][0]["author"]["url"] = CONFIG["mqtt"][
+                    "map_url_prefix"
+                ] + str(getattr(mp, "from"))
 
             if not _is_self_gate:
                 discord_msg["embeds"][0]["footer"]["text"] += f" (via: {_gateway})"
@@ -123,7 +122,14 @@ def on_message(mosq, obj, msg):
             print(f"short_name: {info.short_name}")
             print(f"hw_model: {info.hw_model}")
             print(f"pubkey: {base64.b64encode(info.public_key)}")
-            insert_db(conn, info.id, info.long_name, info.short_name, info.hw_model, base64.b64encode(info.public_key))
+            insert_db(
+                conn,
+                info.id,
+                info.long_name,
+                info.short_name,
+                info.hw_model,
+                base64.b64encode(info.public_key),
+            )
 
         except Exception as e:
             print(f"*** NODEINFO_APP: {str(e)}")
@@ -144,11 +150,14 @@ def on_message(mosq, obj, msg):
         except Exception as e:
             print(f"*** TELEMETRY_APP: {str(e)}")
 
+
 def on_publish(mosq, obj, mid, reason_codes, properties):
     print("Publish")
 
+
 def on_connect(client, userdata, flags, reason_code, properties):
     print(f"Connected with result code {reason_code}")
+
 
 def decode_encrypted(mp, key):
     """Decrypt a meshtastic message."""
@@ -159,7 +168,7 @@ def decode_encrypted(mp, key):
             key = DEFAULT_KEY
 
         # Convert key to bytes
-        key_bytes = base64.b64decode(key.encode('ascii'))
+        key_bytes = base64.b64decode(key.encode("ascii"))
 
         nonce_packet_id = getattr(mp, "id").to_bytes(8, "little")
         nonce_from_node = getattr(mp, "from").to_bytes(8, "little")
@@ -167,9 +176,13 @@ def decode_encrypted(mp, key):
         # Put both parts into a single byte array.
         nonce = nonce_packet_id + nonce_from_node
 
-        cipher = Cipher(algorithms.AES(key_bytes), modes.CTR(nonce), backend=default_backend())
+        cipher = Cipher(
+            algorithms.AES(key_bytes), modes.CTR(nonce), backend=default_backend()
+        )
         decryptor = cipher.decryptor()
-        decrypted_bytes = decryptor.update(getattr(mp, "encrypted")) + decryptor.finalize()
+        decrypted_bytes = (
+            decryptor.update(getattr(mp, "encrypted")) + decryptor.finalize()
+        )
 
         data = mesh_pb2.Data()
         data.ParseFromString(decrypted_bytes)
@@ -181,9 +194,7 @@ def decode_encrypted(mp, key):
 
 def post_discord(msg, webhook):
     if isinstance(msg, str):
-        data = {
-            "content": text
-        }
+        data = {"content": msg}
     else:
         data = msg
 
@@ -197,7 +208,8 @@ def post_discord(msg, webhook):
 
 def create_db(conn):
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
 CREATE TABLE IF NOT EXISTS Nodes (
     id TEXT NOT NULL PRIMARY KEY,
     timestamp INTEGER,
@@ -206,18 +218,22 @@ CREATE TABLE IF NOT EXISTS Nodes (
     hw_model INTEGER,
     public_key TEXT
 );
-""")
+"""
+    )
     conn.commit()
     cursor.close()
 
 
 def insert_db(conn, nodeid, long_name, short_name, hw_model, public_key):
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
 INSERT OR REPLACE INTO Nodes 
     (id, timestamp, long_name, short_name, hw_model, public_key)
 VALUES (?, ?, ?, ?, ?, ?);
-""", (nodeid, time.time(), long_name, short_name, hw_model, public_key))
+""",
+        (nodeid, time.time(), long_name, short_name, hw_model, public_key),
+    )
     conn.commit()
     cursor.close()
 
@@ -225,7 +241,8 @@ VALUES (?, ?, ?, ?, ?, ?);
 def node_lookup(conn, nodeid):
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, timestamp, long_name, short_name, hw_model, public_key FROM Nodes WHERE id = ?", (nodeid,)
+        "SELECT id, timestamp, long_name, short_name, hw_model, public_key FROM Nodes WHERE id = ?",
+        (nodeid,),
     )
     row = cursor.fetchone()
     result = None
@@ -242,8 +259,7 @@ def node_lookup(conn, nodeid):
     return result
 
 
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     # Load the YAML config file, replacing environment variables
     def string_constructor(loader, node):
         t = string.Template(node.value)
@@ -251,18 +267,18 @@ if __name__ == '__main__':
         return value
 
     l = yaml.SafeLoader
-    l.add_constructor('tag:yaml.org,2002:str', string_constructor)
+    l.add_constructor("tag:yaml.org,2002:str", string_constructor)
 
     token_re = string.Template.pattern
-    l.add_implicit_resolver('tag:yaml.org,2002:str', token_re, None)
- 
+    l.add_implicit_resolver("tag:yaml.org,2002:str", token_re, None)
+
     with open("config.yaml", "r") as file:
         CONFIG = yaml.load(file, Loader=l)
 
     # Fold the channel list into a dictionary
-    d = dict()
+    d = {}
     for c in CONFIG["channels"]:
-       d[c["name"]] = c
+        d[c["name"]] = c
     CONFIG["channels"] = d
 
     # Read the nodes database
@@ -278,7 +294,7 @@ if __name__ == '__main__':
     client.username_pw_set(CONFIG["mqtt"]["user"], CONFIG["mqtt"]["password"])
     client.connect(CONFIG["mqtt"]["address"], CONFIG["mqtt"]["port"], 60)
     client.subscribe(CONFIG["mqtt"]["subscription"], 0)
-    
+
     while client.loop() == 0:
         pass
 
