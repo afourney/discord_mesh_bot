@@ -6,6 +6,10 @@ import requests
 import sqlite3
 import time
 import json
+import yaml
+import string
+import os
+import warnings
 
 from datetime import datetime
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -13,23 +17,15 @@ from cryptography.hazmat.backends import default_backend
 from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 from meshtastic import BROADCAST_NUM
 
-DISCORD_WEBHOOK = "TODO_FILL_THIS_IN"
-PS_MESH_KEY = "TODO_FILL_THIS_IN"
-PS_MQTT_KEY = "TODO_FILL_THIS_IN"
+DEFAULT_KEY = "1PG7OiApB1nwvP+rz05pAQ==" # AQ==, expanded
+BROADCAST_ADDR = 4294967295 # 'to:' address, for broadcasts
 
-keymap = {
-    "LongFast": '1PG7OiApB1nwvP+rz05pAQ==', # AQ==, expanded
-    "PS-Mesh!": PS_MESH_KEY,
-    "PS-MQTT!": PS_MQTT_KEY,
-}
+CONFIG = {}
 
 hist = {}
-
 conn = None
 
 def on_message(mosq, obj, msg):
-    #print(base64.b64encode(msg.payload))
-
     se = mqtt_pb2.ServiceEnvelope()
     try:
         se.ParseFromString(msg.payload)
@@ -38,24 +34,35 @@ def on_message(mosq, obj, msg):
         print(f"*** ServiceEnvelope: {str(e)}")
         return
 
-    if mp.to != 4294967295: # Broadcast
-        print("Ignoring DM")
-        return
+    # What do we know about this channel?
+    channel_config = CONFIG["channels"].get(se.channel_id, CONFIG["catch_all"])
 
+    # Decrypt the message if possible
     if mp.HasField("encrypted") and not mp.HasField("decoded"):
-        if se.channel_id in keymap:
-            decode_encrypted(mp, keymap[se.channel_id])
+        decode_encrypted(mp, channel_config.get("key", DEFAULT_KEY))
 
-    #print ("")
-    #print ("Service Envelope:")
-    #print ("="*80)
-    #print (se)
+    print ("")
+    print ("Service Envelope:")
+    print ("="*80)
+    print (se)
+
+    if not mp.HasField("decoded"):
+        # Decoding failed.
+        return 
 
     if mp.decoded.portnum == portnums_pb2.TEXT_MESSAGE_APP:
+        
+        if mp.to != BROADCAST_ADDR: # Broadcast
+            return
+    
+        if "webhook" not in channel_config:
+            # Nowhere to post
+            warnings.warn("No webhook configured for channel '" + se.channel_id + "'")
+            return
+
         try:
             text_payload = mp.decoded.payload.decode("utf-8")
             _from = "!"+ "{0:#0{1}x}".format(getattr(mp, 'from'),8)[2:]
-            _key = _from + "::" + text_payload
 
             _gateway = se.gateway_id
             _channel_id = se.channel_id
@@ -64,6 +71,8 @@ def on_message(mosq, obj, msg):
 
             _node_info = node_lookup(conn, _from)
             _gateway_info = node_lookup(conn, _gateway)
+
+            _key = _channel_id + "::" + _from + "::" + text_payload
 
             if _node_info is not None:
                 _from = f"{_node_info['long_name']}"
@@ -76,16 +85,18 @@ def on_message(mosq, obj, msg):
             discord_msg = {
                 "embeds": [{
                     "description": "```" + text_payload.replace("`", "'") + " ```",
-                    "timestamp": iso_now,
+                    #"timestamp": iso_now,
                     "author": {
                         "name": _from,
-                        "url": "https://meshtastic.davekeogh.com/?node_id=" + str(getattr(mp, 'from')),
                     },
                     "footer": {
-                        "text": f"Channel: {_channel_id}",
+                        "text": f"{_channel_id}",
                     },
                  }]
             }   
+
+            if "map_url_prefix" in CONFIG["mqtt"]:
+                discord_msg["embeds"][0]["author"]["url"] = CONFIG["mqtt"]["map_url_prefix"] + str(getattr(mp, 'from'))
 
             if not _is_self_gate:
                 discord_msg["embeds"][0]["footer"]["text"] += f" (via: {_gateway})"
@@ -93,9 +104,13 @@ def on_message(mosq, obj, msg):
             if _key not in hist:
                 hist[_key] = True
                 print(json.dumps(discord_msg, indent=4))
-                post_discord(discord_msg)
 
-            #print(text_payload)
+                thread_param = ""
+                if "thread" in channel_config:
+                    thread_param = "?thread_id=" + str(channel_config["thread"])
+
+                post_discord(discord_msg, channel_config["webhook"] + thread_param)
+
         except Exception as e:
             print(f"*** TEXT_MESSAGE_APP: {str(e)}")
 
@@ -103,11 +118,11 @@ def on_message(mosq, obj, msg):
         info = mesh_pb2.User()
         try:
             info.ParseFromString(mp.decoded.payload)
-            #print(f"id: {info.id}")
-            #print(f"long_name: {info.long_name}")
-            #print(f"short_name: {info.short_name}")
-            #print(f"hw_model: {info.hw_model}")
-            #print(f"pubkey: {base64.b64encode(info.public_key)}")
+            print(f"id: {info.id}")
+            print(f"long_name: {info.long_name}")
+            print(f"short_name: {info.short_name}")
+            print(f"hw_model: {info.hw_model}")
+            print(f"pubkey: {base64.b64encode(info.public_key)}")
             insert_db(conn, info.id, info.long_name, info.short_name, info.hw_model, base64.b64encode(info.public_key))
 
         except Exception as e:
@@ -117,7 +132,7 @@ def on_message(mosq, obj, msg):
         pos = mesh_pb2.Position()
         try:
             pos.ParseFromString(mp.decoded.payload)
-            #print(pos)
+            print(pos)
         except Exception as e:
             print(f"*** POSITION_APP: {str(e)}")
 
@@ -125,7 +140,7 @@ def on_message(mosq, obj, msg):
         env = telemetry_pb2.Telemetry()
         try:
             env.ParseFromString(mp.decoded.payload)
-            #print(env)
+            print(env)
         except Exception as e:
             print(f"*** TELEMETRY_APP: {str(e)}")
 
@@ -139,6 +154,10 @@ def decode_encrypted(mp, key):
     """Decrypt a meshtastic message."""
 
     try:
+        # Expand the default key
+        if key == "AQ==":
+            key = DEFAULT_KEY
+
         # Convert key to bytes
         key_bytes = base64.b64decode(key.encode('ascii'))
 
@@ -160,7 +179,7 @@ def decode_encrypted(mp, key):
         print(f"*** Decryption failed: {str(e)}")
 
 
-def post_discord(msg):
+def post_discord(msg, webhook):
     if isinstance(msg, str):
         data = {
             "content": text
@@ -168,7 +187,7 @@ def post_discord(msg):
     else:
         data = msg
 
-    response = requests.post(DISCORD_WEBHOOK, json=data)
+    response = requests.post(webhook, json=data)
     if response.status_code == 204:
         pass
     else:
@@ -224,17 +243,41 @@ def node_lookup(conn, nodeid):
 
 
 if __name__ == '__main__':
+
+    # Load the YAML config file, replacing environment variables
+    def string_constructor(loader, node):
+        t = string.Template(node.value)
+        value = t.safe_substitute(os.environ)
+        return value
+
+    l = yaml.SafeLoader
+    l.add_constructor('tag:yaml.org,2002:str', string_constructor)
+
+    token_re = string.Template.pattern
+    l.add_implicit_resolver('tag:yaml.org,2002:str', token_re, None)
+ 
+    with open("config.yaml", "r") as file:
+        CONFIG = yaml.load(file, Loader=l)
+
+    # Fold the channel list into a dictionary
+    d = dict()
+    for c in CONFIG["channels"]:
+       d[c["name"]] = c
+    CONFIG["channels"] = d
+
+    # Read the nodes database
     conn = sqlite3.connect("nodes.db")
     create_db(conn)
 
+    # Start the MQTT client
     client = paho.Client(paho.CallbackAPIVersion.VERSION2, client_id="meshobserv-7362")
     client.on_message = on_message
     client.on_publish = on_publish
     client.on_connect = on_connect
 
-    client.username_pw_set("meshdev", "large4cats")
-    client.connect("mqtt.davekeogh.com", 1883, 60)
-    client.subscribe("msh/US/2/e/#", 0)
+    client.username_pw_set(CONFIG["mqtt"]["user"], CONFIG["mqtt"]["password"])
+    client.connect(CONFIG["mqtt"]["address"], CONFIG["mqtt"]["port"], 60)
+    client.subscribe(CONFIG["mqtt"]["subscription"], 0)
     
     while client.loop() == 0:
         pass

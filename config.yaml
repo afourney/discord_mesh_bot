@@ -1,0 +1,31 @@
+# MQTT Settings
+mqtt:
+  address: mqtt.davekeogh.com
+  port: 1883
+  user: meshdev
+  password: large4cats  
+  subscription: msh/US/2/e/#
+  map_url_prefix: https://meshtastic.davekeogh.com/?node_id= # Node ID will be appended
+
+# Channel settings
+channels:
+  - name: LongFast
+    key: AQ==
+    webhook: ${DISCORD_WEBHOOK}
+    thread: 1323496893883613295
+  - name: PS-Mesh!
+    key: jHrxpQOq6dEBC5Ldr3ULrQ==
+    webhook: ${DISCORD_WEBHOOK}
+    thread: 1323497088771817583
+  - name: PS-MQTT!
+    key: mqttmqttmqttmqttmqttQQ==
+    webhook: ${DISCORD_WEBHOOK}
+    thread: 1323498658439626752
+  - name: TestChannel
+    key: AQ==
+    webhook: ${TEST_WEBHOOK}
+
+# Catch all settings
+catch_all:
+    key: AQ==
+    webhook: ${DISCORD_WEBHOOK}
