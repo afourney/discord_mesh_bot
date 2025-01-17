@@ -5,10 +5,10 @@ import time
 import warnings
 
 import base64
-import json
 import os
 import requests
 import yaml
+import threading
 
 import paho.mqtt.client as paho
 from cryptography.hazmat.backends import default_backend
@@ -22,133 +22,199 @@ CONFIG = {}
 
 hist = {}
 conn = None
+lock = threading.Lock()
+
+
+def sender_id(mp: mesh_pb2.MeshPacket):
+    """
+    Given a MeshPacket, return the "sender id" which is a hex
+    representation of the last 8 bytes of the MAC address.
+
+    For example, !ff11ff22
+    """
+    return "!" + "{0:#0{1}x}".format(getattr(mp, "from"), 8)[2:]
+
+
+def discord_message_key(se: mqtt_pb2.ServiceEnvelope, mp: mesh_pb2.MeshPacket):
+    """
+    Rudimentary key to deduplicate messages.
+    TODO: See what Meshtastic does here to deduplicate packets, maybe we can do the same?
+    """
+    return f"{se.channel_id}::{sender_id(mp)}::{mp.decoded.payload.decode('utf-8')}"
+
+
+class DiscordMessage:
+    """
+    Object representing the information we want to expose via Discord messages.
+
+    We store this object in memory so we can update messages as more nodes
+    report hearing them.
+    """
+
+    mesh_packets = []
+    discord_message_id = None
+
+    def __init__(self, channel_id: str, gateway_id: str, mp: mesh_pb2.MeshPacket):
+        """
+        Construct discord message from Meshtastic protobuf.
+        """
+        self.from_id = sender_id(mp)
+        self.channel_id = channel_id
+        self.message_text = mp.decoded.payload.decode("utf-8")
+
+        self.add_meshpacket(gateway_id, mp)
+
+    def add_meshpacket(self, gateway_id: str, mp: mesh_pb2.MeshPacket):
+        self.mesh_packets.append((gateway_id, mp))
+
+    def render(self):
+        """
+        Renders the message out as a Discord-compatible dictionary.
+        """
+
+        primary_embed = {
+            "description": "```" + self.message_text.replace("`", "'") + " ```",
+            "author": {
+                "name": node_long_name(conn, self.from_id),
+            },
+            "footer": {
+                "text": f"{self.channel_id}",
+            },
+        }
+
+        stats_desc = ""
+        index = 1
+        for gateway_id, mp in self.mesh_packets:
+            if gateway_id == self.from_id:
+                stats_desc += f"{index}. self-gated\n"
+            else:
+                stats_desc += (
+                    f"{index}. {node_long_name(conn, gateway_id)} (SNR: {mp.rx_snr})\n"
+                )
+
+        stats_embed = {
+            "author": {"name": "Statistics"},
+            "description": stats_desc,
+        }
+
+        discord_data = {"embeds": [primary_embed, stats_embed]}
+
+        return discord_data
+
+    def publish(self, config) -> str:
+        """
+        Posts the message to Discord channel with the provided config.
+        """
+        query_params = {
+            "thread_id": config.get("thread", None),
+            "wait": True,
+        }
+
+        url = config["webhook"]
+
+        if self.discord_message_id:
+            url += f"/messages/{self.discord_message_id}"
+            response = requests.patch(url, params=query_params, json=self.render())
+        else:
+            response = requests.post(url, params=query_params, json=self.render())
+
+        if response.status_code == 200:
+            self.discord_message_id = response.json()["id"]
+        else:
+            print(f"Failed to send message. Status code: {response.status_code}")
+            print(response.text)
 
 
 def on_message(mosq, obj, msg):
-    se = mqtt_pb2.ServiceEnvelope()
-    try:
-        se.ParseFromString(msg.payload)
-        mp = se.packet
-    except Exception as e:
-        print(f"*** ServiceEnvelope: {str(e)}")
-        return
-
-    # What do we know about this channel?
-    channel_config = CONFIG["channels"].get(se.channel_id, CONFIG["catch_all"])
-
-    # Decrypt the message if possible
-    if mp.HasField("encrypted") and not mp.HasField("decoded"):
-        decode_encrypted(mp, channel_config.get("key", DEFAULT_KEY))
-
-    print("")
-    print("Service Envelope:")
-    print("=" * 80)
-    print(se)
-
-    if not mp.HasField("decoded"):
-        # Decoding failed.
-        return
-
-    if mp.decoded.portnum == portnums_pb2.TEXT_MESSAGE_APP:
-        if mp.to != BROADCAST_NUM:  # Broadcast
+    with lock:
+        se = mqtt_pb2.ServiceEnvelope()
+        try:
+            se.ParseFromString(msg.payload)
+            mp = se.packet
+        except Exception as e:
+            print(f"*** ServiceEnvelope: {str(e)}")
             return
 
-        if "webhook" not in channel_config:
-            # Nowhere to post
-            warnings.warn("No webhook configured for channel '" + se.channel_id + "'")
+        # What do we know about this channel?
+        channel_config = CONFIG["channels"].get(se.channel_id, CONFIG["catch_all"])
+
+        # Decrypt the message if possible
+        if mp.HasField("encrypted") and not mp.HasField("decoded"):
+            decode_encrypted(mp, channel_config.get("key", DEFAULT_KEY))
+
+        # print("")
+        # print("Service Envelope:")
+        # print("=" * 80)
+        # print(se)
+
+        if not mp.HasField("decoded"):
+            # Decoding failed.
             return
 
-        try:
-            text_payload = mp.decoded.payload.decode("utf-8")
-            _from = "!" + "{0:#0{1}x}".format(getattr(mp, "from"), 8)[2:]
+        if mp.decoded.portnum == portnums_pb2.TEXT_MESSAGE_APP:
+            try:
+                if mp.to != BROADCAST_NUM:  # Broadcast
+                    return
 
-            _gateway = se.gateway_id
-            _channel_id = se.channel_id
-            _topic = msg.topic
-            _is_self_gate = _from == _gateway
+                if "webhook" not in channel_config:
+                    # Nowhere to post
+                    warnings.warn(
+                        "No webhook configured for channel '" + se.channel_id + "'"
+                    )
+                    return
 
-            _node_info = node_lookup(conn, _from)
-            _gateway_info = node_lookup(conn, _gateway)
+                history_key = discord_message_key(se, mp)
+                if history_key not in hist:
+                    print(f"New message: {history_key}")
+                    discord_msg = DiscordMessage(se.channel_id, se.gateway_id, mp)
+                    hist[history_key] = discord_msg
+                else:
+                    # We've seen this message before, update the stored
+                    # message with the latest ServiceEnvelope and MeshPacket
+                    print(f"Existing message: {history_key}")
+                    discord_msg = hist[history_key]
+                    discord_msg.add_meshpacket(se.gateway_id, mp)
 
-            _key = _channel_id + "::" + _from + "::" + text_payload
+                discord_msg.publish(channel_config)
+            except Exception as e:
+                print(f"*** TEXT_MESSAGE_APP: {str(e)}")
 
-            if _node_info is not None:
-                _from = f"{_node_info['long_name']}"
-            if _gateway_info is not None:
-                _gateway = f"{_gateway_info['long_name']}"
+        elif mp.decoded.portnum == portnums_pb2.NODEINFO_APP:
+            info = mesh_pb2.User()
+            try:
+                info.ParseFromString(mp.decoded.payload)
+                # print(f"id: {info.id}")
+                # print(f"long_name: {info.long_name}")
+                # print(f"short_name: {info.short_name}")
+                # print(f"hw_model: {info.hw_model}")
+                # print(f"pubkey: {base64.b64encode(info.public_key)}")
+                insert_db(
+                    conn,
+                    info.id,
+                    info.long_name,
+                    info.short_name,
+                    info.hw_model,
+                    base64.b64encode(info.public_key),
+                )
 
-            discord_msg = {
-                "embeds": [
-                    {
-                        "description": "```" + text_payload.replace("`", "'") + " ```",
-                        # "timestamp": datetime.now().isoformat(),
-                        "author": {
-                            "name": _from,
-                        },
-                        "footer": {
-                            "text": f"{_channel_id}",
-                        },
-                    }
-                ]
-            }
+            except Exception as e:
+                print(f"*** NODEINFO_APP: {str(e)}")
 
-            if "map_url_prefix" in CONFIG["mqtt"]:
-                discord_msg["embeds"][0]["author"]["url"] = CONFIG["mqtt"][
-                    "map_url_prefix"
-                ] + str(getattr(mp, "from"))
+        elif mp.decoded.portnum == portnums_pb2.POSITION_APP:
+            pos = mesh_pb2.Position()
+            try:
+                pos.ParseFromString(mp.decoded.payload)
+                # print(pos)
+            except Exception as e:
+                print(f"*** POSITION_APP: {str(e)}")
 
-            if not _is_self_gate:
-                discord_msg["embeds"][0]["footer"]["text"] += f" (via: {_gateway})"
-
-            if _key not in hist:
-                hist[_key] = True
-                print(json.dumps(discord_msg, indent=4))
-
-                thread_param = ""
-                if "thread" in channel_config:
-                    thread_param = "?thread_id=" + str(channel_config["thread"])
-
-                post_discord(discord_msg, channel_config["webhook"] + thread_param)
-
-        except Exception as e:
-            print(f"*** TEXT_MESSAGE_APP: {str(e)}")
-
-    elif mp.decoded.portnum == portnums_pb2.NODEINFO_APP:
-        info = mesh_pb2.User()
-        try:
-            info.ParseFromString(mp.decoded.payload)
-            print(f"id: {info.id}")
-            print(f"long_name: {info.long_name}")
-            print(f"short_name: {info.short_name}")
-            print(f"hw_model: {info.hw_model}")
-            print(f"pubkey: {base64.b64encode(info.public_key)}")
-            insert_db(
-                conn,
-                info.id,
-                info.long_name,
-                info.short_name,
-                info.hw_model,
-                base64.b64encode(info.public_key),
-            )
-
-        except Exception as e:
-            print(f"*** NODEINFO_APP: {str(e)}")
-
-    elif mp.decoded.portnum == portnums_pb2.POSITION_APP:
-        pos = mesh_pb2.Position()
-        try:
-            pos.ParseFromString(mp.decoded.payload)
-            print(pos)
-        except Exception as e:
-            print(f"*** POSITION_APP: {str(e)}")
-
-    elif mp.decoded.portnum == portnums_pb2.TELEMETRY_APP:
-        env = telemetry_pb2.Telemetry()
-        try:
-            env.ParseFromString(mp.decoded.payload)
-            print(env)
-        except Exception as e:
-            print(f"*** TELEMETRY_APP: {str(e)}")
+        elif mp.decoded.portnum == portnums_pb2.TELEMETRY_APP:
+            env = telemetry_pb2.Telemetry()
+            try:
+                env.ParseFromString(mp.decoded.payload)
+                # print(env)
+            except Exception as e:
+                print(f"*** TELEMETRY_APP: {str(e)}")
 
 
 def on_publish(mosq, obj, mid, reason_codes, properties):
@@ -190,20 +256,6 @@ def decode_encrypted(mp, key):
 
     except Exception as e:
         print(f"*** Decryption failed: {str(e)}")
-
-
-def post_discord(msg, webhook):
-    if isinstance(msg, str):
-        data = {"content": msg}
-    else:
-        data = msg
-
-    response = requests.post(webhook, json=data)
-    if response.status_code == 204:
-        pass
-    else:
-        print(f"Failed to send message. Status code: {response.status_code}")
-        print(response.text)
 
 
 def create_db(conn):
@@ -259,6 +311,14 @@ def node_lookup(conn, nodeid):
     return result
 
 
+def node_long_name(conn, nodeid):
+    db_res = node_lookup(conn, nodeid)
+    if db_res:
+        return db_res["long_name"]
+    else:
+        return nodeid
+
+
 if __name__ == "__main__":
     # Load the YAML config file, replacing environment variables
     def string_constructor(loader, node):
@@ -286,7 +346,7 @@ if __name__ == "__main__":
     create_db(conn)
 
     # Start the MQTT client
-    client = paho.Client(paho.CallbackAPIVersion.VERSION2, client_id="meshobserv-7362")
+    client = paho.Client(paho.CallbackAPIVersion.VERSION2, client_id="ctso-bot-dev")
     client.on_message = on_message
     client.on_publish = on_publish
     client.on_connect = on_connect
