@@ -14,6 +14,7 @@ import yaml
 from cachetools import TTLCache
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from collections import OrderedDict
 from meshtastic import BROADCAST_NUM
 from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 
@@ -60,7 +61,7 @@ class DiscordMessage:
         """
         Construct discord message from Meshtastic protobuf.
         """
-        self.mesh_packets = []
+        self.mesh_packets = OrderedDict()
         self.discord_message_id = None
         self.from_id = sender_id(mp)
         self.channel_id = channel_id
@@ -69,7 +70,7 @@ class DiscordMessage:
         self.add_meshpacket(gateway_id, mp)
 
     def add_meshpacket(self, gateway_id: str, mp: mesh_pb2.MeshPacket):
-        self.mesh_packets.append((gateway_id, mp))
+        self.mesh_packets[gateway_id] = mp
 
     def render(self):
         """
@@ -92,7 +93,7 @@ class DiscordMessage:
 
         stats_desc = ""
         index = 1
-        for gateway_id, mp in self.mesh_packets:
+        for gateway_id, mp in self.mesh_packets.items():
             if gateway_id == self.from_id:
                 stats_desc += f"{index}. self-gated\n"
             else:
@@ -189,11 +190,17 @@ def on_message(mosq, obj, msg):
                     discord_msg = DiscordMessage(se.channel_id, se.gateway_id, mp)
                     hist[history_key] = discord_msg
                 else:
-                    # We've seen this message before, update the stored
-                    # message with the latest ServiceEnvelope and MeshPacket
-                    logging.info(f"Existing {portnum_type}: key={history_key}")
-                    discord_msg = hist[history_key]
-                    discord_msg.add_meshpacket(se.gateway_id, mp)
+                    # We've seen this message before, update the existing message
+                    if gateway_node_id not in hist[history_key].mesh_packets:
+                        logging.info(f"Existing {portnum_type}: key={history_key}")
+                        discord_msg = hist[history_key]
+                        discord_msg.add_meshpacket(se.gateway_id, mp)
+                    else:
+                        # We've seen this message from this gateway before, ignore it and bail out
+                        logging.info(
+                            f"Duplicate {portnum_type}: key={history_key}, gateway={gateway_node_id}"
+                        )
+                        return
 
                 discord_msg.publish(channel_config)
             except Exception as e:
