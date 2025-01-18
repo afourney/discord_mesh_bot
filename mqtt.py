@@ -92,7 +92,7 @@ class DiscordMessage:
                 stats_desc += f"{index}. self-gated\n"
             else:
                 hops_used = mp.hop_start - mp.hop_limit
-                hops_available = mp.hop_limit - hops_used
+                hops_available = mp.hop_start - hops_used
                 stats_desc += f"{index}. {node_long_name(conn, gateway_id)} (Hops: {hops_used} ({hops_available} remaining), SNR: {mp.rx_snr}, RSSI: {mp.rx_rssi})\n"
 
         stats_embed = {
