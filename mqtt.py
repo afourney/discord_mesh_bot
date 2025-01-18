@@ -203,6 +203,8 @@ def on_message(mosq, obj, msg):
                         return
 
                 discord_msg.publish(channel_config)
+            except Exception as e:
+                logging.info(f"*** Error while processing TEXT_MESSAGE_APP: {str(e)}")
 
         elif mp.decoded.portnum == portnums_pb2.NODEINFO_APP:
             info = mesh_pb2.User()
@@ -390,7 +392,9 @@ if __name__ == "__main__":
     create_db(conn)
 
     # Start the MQTT client
-    client = paho.Client(paho.CallbackAPIVersion.VERSION2, client_id="meshobserv-7362")
+    client = paho.Client(
+        paho.CallbackAPIVersion.VERSION2, client_id="ctso-discord-bot-test"
+    )
     client.on_message = on_message
     client.on_publish = on_publish
     client.on_connect = on_connect
