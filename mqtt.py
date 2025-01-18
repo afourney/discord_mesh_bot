@@ -20,6 +20,11 @@ from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 DEFAULT_KEY = "1PG7OiApB1nwvP+rz05pAQ=="  # AQ==, expanded
 CONFIG = {}
 
+SIGNAL_NONE = ":red_circle:"
+SIGNAL_BAD = ":orange_circle:"
+SIGNAL_FAIR = ":yellow_circle:"
+SIGNAL_GOOD = ":green_circle:"
+
 hist = TTLCache(maxsize=1000, ttl=3600)  # Cache up to 1000 messages for 1 hour
 conn = None
 lock = threading.Lock()
@@ -93,7 +98,11 @@ class DiscordMessage:
             else:
                 hops_used = mp.hop_start - mp.hop_limit
                 hops_available = mp.hop_start - hops_used
-                stats_desc += f"{index}. {node_long_name(conn, gateway_id)} (Hops: {hops_used} ({hops_available} remaining), SNR: {mp.rx_snr}, RSSI: {mp.rx_rssi})\n"
+
+                rssi_color = get_rssi_color(mp.rx_rssi)
+                snr_color = get_snr_color(mp.rx_snr)
+
+                stats_desc += f"{index}. {node_long_name(conn, gateway_id)} (Hops: {hops_used} with {hops_available} remaining, SNR: {mp.rx_snr} {snr_color}, RSSI: {mp.rx_rssi} {rssi_color})\n"
 
         stats_embed = {
             "author": {"name": "Heard by..."},
@@ -312,6 +321,34 @@ def node_long_name(conn, nodeid):
         return db_res["long_name"]
     else:
         return nodeid
+
+
+# https://github.com/meshtastic/Meshtastic-Apple/blob/main/Meshtastic/Views/Helpers/LoRaSignalStrengthIndicator.swift
+def get_rssi_color(rssi):
+    # rssi == 0 when not available
+    if not rssi:
+        return SIGNAL_NONE
+    elif rssi > -115:
+        return SIGNAL_GOOD
+    elif rssi > -120:
+        return SIGNAL_FAIR
+    elif rssi > -126:
+        return SIGNAL_BAD
+    else:
+        return SIGNAL_NONE
+
+
+def get_snr_color(snr):
+    snr_limit = -17.5  # Assumes LONG_FAST
+    if not snr:
+        return SIGNAL_NONE
+    elif snr > snr_limit:
+        return SIGNAL_GOOD
+    elif snr > snr_limit - 5.5:
+        return SIGNAL_FAIR
+    elif snr > snr_limit - 7.5:
+        return SIGNAL_BAD
+    return SIGNAL_NONE
 
 
 if __name__ == "__main__":
