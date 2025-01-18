@@ -392,9 +392,7 @@ if __name__ == "__main__":
     create_db(conn)
 
     # Start the MQTT client
-    client = paho.Client(
-        paho.CallbackAPIVersion.VERSION2, client_id="ctso-discord-bot-test"
-    )
+    client = paho.Client(paho.CallbackAPIVersion.VERSION2, client_id="meshobserv-7362")
     client.on_message = on_message
     client.on_publish = on_publish
     client.on_connect = on_connect
