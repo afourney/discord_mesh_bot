@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-import string
+import base64
+import logging
+import os
 import sqlite3
+import string
+import sys
+import threading
 import time
 import warnings
-
-import base64
-import os
+import paho.mqtt.client as paho
 import requests
 import yaml
-import threading
-
-import paho.mqtt.client as paho
+from cachetools import TTLCache
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from meshtastic import BROADCAST_NUM
 from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 
 DEFAULT_KEY = "1PG7OiApB1nwvP+rz05pAQ=="  # AQ==, expanded
-
 CONFIG = {}
 
-hist = {}
+hist = TTLCache(maxsize=1000, ttl=3600)  # Cache up to 1000 messages for 1 hour
 conn = None
 lock = threading.Lock()
 
@@ -51,13 +51,12 @@ class DiscordMessage:
     report hearing them.
     """
 
-    mesh_packets = []
-    discord_message_id = None
-
     def __init__(self, channel_id: str, gateway_id: str, mp: mesh_pb2.MeshPacket):
         """
         Construct discord message from Meshtastic protobuf.
         """
+        self.mesh_packets = []
+        self.discord_message_id = None
         self.from_id = sender_id(mp)
         self.channel_id = channel_id
         self.message_text = mp.decoded.payload.decode("utf-8")
@@ -81,6 +80,10 @@ class DiscordMessage:
                 "text": f"{self.channel_id}",
             },
         }
+        if "map_url_prefix" in CONFIG["mqtt"]:
+            primary_embed["author"]["url"] = (
+                CONFIG["mqtt"]["map_url_prefix"] + self.from_id
+            )
 
         stats_desc = ""
         index = 1
@@ -88,12 +91,12 @@ class DiscordMessage:
             if gateway_id == self.from_id:
                 stats_desc += f"{index}. self-gated\n"
             else:
-                stats_desc += (
-                    f"{index}. {node_long_name(conn, gateway_id)} (SNR: {mp.rx_snr})\n"
-                )
+                hops_used = mp.hop_start - mp.hop_limit
+                hops_available = mp.hop_limit - hops_used
+                stats_desc += f"{index}. {node_long_name(conn, gateway_id)} (Hops: {hops_used} ({hops_available} remaining), SNR: {mp.rx_snr}, RSSI: {mp.rx_rssi})\n"
 
         stats_embed = {
-            "author": {"name": "Statistics"},
+            "author": {"name": "Heard by..."},
             "description": stats_desc,
         }
 
@@ -121,8 +124,8 @@ class DiscordMessage:
         if response.status_code == 200:
             self.discord_message_id = response.json()["id"]
         else:
-            print(f"Failed to send message. Status code: {response.status_code}")
-            print(response.text)
+            logging.info(f"Failed to send message. Status code: {response.status_code}")
+            logging.info(response.text)
 
 
 def on_message(mosq, obj, msg):
@@ -132,8 +135,13 @@ def on_message(mosq, obj, msg):
             se.ParseFromString(msg.payload)
             mp = se.packet
         except Exception as e:
-            print(f"*** ServiceEnvelope: {str(e)}")
+            logging.info(f"Error parsing ServiceEnvelope: {str(e)}")
             return
+
+        from_node_id = sender_id(mp)
+        from_node_name = node_long_name(conn, from_node_id)
+        gateway_node_id = se.gateway_id
+        gateway_node_name = node_long_name(conn, se.gateway_id)
 
         # What do we know about this channel?
         channel_config = CONFIG["channels"].get(se.channel_id, CONFIG["catch_all"])
@@ -142,14 +150,17 @@ def on_message(mosq, obj, msg):
         if mp.HasField("encrypted") and not mp.HasField("decoded"):
             decode_encrypted(mp, channel_config.get("key", DEFAULT_KEY))
 
-        # print("")
-        # print("Service Envelope:")
-        # print("=" * 80)
-        # print(se)
-
         if not mp.HasField("decoded"):
             # Decoding failed.
+            logging.info(
+                f"ServiceEnvelope: '{gateway_node_name}' ({gateway_node_id}) published encrypted packet for '{from_node_name} ({from_node_id})"
+            )
             return
+
+        portnum_type = portnums_pb2.PortNum.Name(mp.decoded.portnum)
+        logging.info(
+            f"ServiceEnvelope: '{gateway_node_name}' ({gateway_node_id}) published {portnum_type} for '{from_node_name}' ({from_node_id})"
+        )
 
         if mp.decoded.portnum == portnums_pb2.TEXT_MESSAGE_APP:
             try:
@@ -165,56 +176,40 @@ def on_message(mosq, obj, msg):
 
                 history_key = discord_message_key(se, mp)
                 if history_key not in hist:
-                    print(f"New message: {history_key}")
+                    logging.info(f"New {portnum_type}: key={history_key}")
                     discord_msg = DiscordMessage(se.channel_id, se.gateway_id, mp)
                     hist[history_key] = discord_msg
                 else:
                     # We've seen this message before, update the stored
                     # message with the latest ServiceEnvelope and MeshPacket
-                    print(f"Existing message: {history_key}")
+                    logging.info(f"Existing {portnum_type}: key={history_key}")
                     discord_msg = hist[history_key]
                     discord_msg.add_meshpacket(se.gateway_id, mp)
 
                 discord_msg.publish(channel_config)
             except Exception as e:
-                print(f"*** TEXT_MESSAGE_APP: {str(e)}")
+                logging.info(f"*** Error while processing TEXT_MESSAGE_APP: {str(e)}")
 
         elif mp.decoded.portnum == portnums_pb2.NODEINFO_APP:
             info = mesh_pb2.User()
             try:
                 info.ParseFromString(mp.decoded.payload)
-                # print(f"id: {info.id}")
-                # print(f"long_name: {info.long_name}")
-                # print(f"short_name: {info.short_name}")
-                # print(f"hw_model: {info.hw_model}")
-                # print(f"pubkey: {base64.b64encode(info.public_key)}")
+                public_key = base64.b64encode(info.public_key)
+                hw_model = mesh_pb2.HardwareModel.Name(info.hw_model)
+                logging.info(
+                    f"{portnum_type}: id={info.id}, long_name='{info.long_name}', short_name={info.short_name}, hw_model={hw_model}, public_key={str(public_key)}"
+                )
                 insert_db(
                     conn,
                     info.id,
                     info.long_name,
                     info.short_name,
                     info.hw_model,
-                    base64.b64encode(info.public_key),
+                    public_key,
                 )
 
             except Exception as e:
-                print(f"*** NODEINFO_APP: {str(e)}")
-
-        elif mp.decoded.portnum == portnums_pb2.POSITION_APP:
-            pos = mesh_pb2.Position()
-            try:
-                pos.ParseFromString(mp.decoded.payload)
-                # print(pos)
-            except Exception as e:
-                print(f"*** POSITION_APP: {str(e)}")
-
-        elif mp.decoded.portnum == portnums_pb2.TELEMETRY_APP:
-            env = telemetry_pb2.Telemetry()
-            try:
-                env.ParseFromString(mp.decoded.payload)
-                # print(env)
-            except Exception as e:
-                print(f"*** TELEMETRY_APP: {str(e)}")
+                logging.info(f"*** Error processing NODEINFO_APP: {str(e)}")
 
 
 def on_publish(mosq, obj, mid, reason_codes, properties):
@@ -320,6 +315,13 @@ def node_long_name(conn, nodeid):
 
 
 if __name__ == "__main__":
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
     # Load the YAML config file, replacing environment variables
     def string_constructor(loader, node):
         t = string.Template(node.value)
