@@ -21,6 +21,7 @@ from meshtastic.protobuf import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 DEFAULT_KEY = "1PG7OiApB1nwvP+rz05pAQ=="  # AQ==, expanded
 CONFIG = {}
 
+SIGNAL_MISSING = ":no_entry_sign:"
 SIGNAL_NONE = ":red_circle:"
 SIGNAL_BAD = ":orange_circle:"
 SIGNAL_FAIR = ":yellow_circle:"
@@ -97,8 +98,8 @@ class DiscordMessage:
             if gateway_id == self.from_id:
                 stats_desc += f"{index}. self-gated\n"
             else:
-                hops_used = mp.hop_start - mp.hop_limit
-                hops_available = mp.hop_start - hops_used
+                hops_used = max(0, mp.hop_start - mp.hop_limit)
+                hops_available = mp.hop_limit
 
                 rssi_color = get_rssi_color(mp.rx_rssi)
                 snr_color = get_snr_color(mp.rx_snr)
@@ -334,7 +335,7 @@ def node_long_name(conn, nodeid):
 def get_rssi_color(rssi):
     # rssi == 0 when not available
     if not rssi:
-        return SIGNAL_NONE
+        return SIGNAL_MISSING
     elif rssi > -115:
         return SIGNAL_GOOD
     elif rssi > -120:
@@ -347,9 +348,7 @@ def get_rssi_color(rssi):
 
 def get_snr_color(snr):
     snr_limit = -17.5  # Assumes LONG_FAST
-    if not snr:
-        return SIGNAL_NONE
-    elif snr > snr_limit:
+    if snr > snr_limit:
         return SIGNAL_GOOD
     elif snr > snr_limit - 5.5:
         return SIGNAL_FAIR
