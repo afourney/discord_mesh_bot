@@ -186,6 +186,12 @@ def on_message(mosq, obj, msg):
                     )
                     return
 
+                if from_node_id in CONFIG["blocked_senders"]:
+                    logging.info(
+                        f"Dropping message from blocked sender: {from_node_id}"
+                    )
+                    return
+
                 history_key = discord_message_key(se, mp)
                 if history_key not in hist:
                     logging.info(f"New {portnum_type}: key={history_key}")
