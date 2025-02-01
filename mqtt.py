@@ -65,6 +65,7 @@ class DiscordMessage:
         self.mesh_packets = OrderedDict()
         self.discord_message_id = None
         self.from_id = sender_id(mp)
+        self.from_mac = getattr(mp, "from")
         self.channel_id = channel_id
         self.message_text = mp.decoded.payload.decode("utf-8")
 
@@ -89,7 +90,7 @@ class DiscordMessage:
         }
         if "map_url_prefix" in CONFIG["mqtt"]:
             primary_embed["author"]["url"] = (
-                CONFIG["mqtt"]["map_url_prefix"] + self.from_id
+                CONFIG["mqtt"]["map_url_prefix"] + self.from_mac
             )
 
         stats_desc = ""
@@ -182,6 +183,12 @@ def on_message(mosq, obj, msg):
                     # Nowhere to post
                     warnings.warn(
                         "No webhook configured for channel '" + se.channel_id + "'"
+                    )
+                    return
+
+                if from_node_id in CONFIG["blocked_senders"]:
+                    logging.info(
+                        f"Dropping message from blocked sender: {from_node_id}"
                     )
                     return
 

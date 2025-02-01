@@ -29,3 +29,5 @@ channels:
 catch_all:
   key: AQ==
   webhook: ${DISCORD_WEBHOOK}
+
+blocked_senders: []
