@@ -21,6 +21,10 @@ channels:
     key: mqttmqttmqttmqttmqttQQ==
     webhook: ${DISCORD_WEBHOOK}
     thread: 1323498658439626752
+  - name: MediumFast
+    key: AQ==
+    webhook: ${DISCORD_WEBHOOK}
+    thread: 1331120398057607220
   - name: TestChannel
     key: AQ==
     webhook: ${TEST_WEBHOOK}
@@ -29,5 +33,8 @@ channels:
 catch_all:
   key: AQ==
   webhook: ${DISCORD_WEBHOOK}
+  thread: 1331404564221657160
 
-blocked_senders: []
+# Blocked senders
+blocked_senders:
+  - "!433e3d00"

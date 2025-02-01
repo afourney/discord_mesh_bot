@@ -89,8 +89,8 @@ class DiscordMessage:
             },
         }
         if "map_url_prefix" in CONFIG["mqtt"]:
-            primary_embed["author"]["url"] = (
-                CONFIG["mqtt"]["map_url_prefix"] + self.from_mac
+            primary_embed["author"]["url"] = CONFIG["mqtt"]["map_url_prefix"] + str(
+                self.from_mac
             )
 
         stats_desc = ""
