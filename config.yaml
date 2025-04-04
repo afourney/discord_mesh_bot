@@ -25,6 +25,10 @@ channels:
     key: AQ==
     webhook: ${DISCORD_WEBHOOK}
     thread: 1331120398057607220
+  - name: ShortFast
+    key: AQ==
+    webhook: ${DISCORD_WEBHOOK}
+    thread: 1357569050011766845
   - name: TestChannel
     key: AQ==
     webhook: ${TEST_WEBHOOK}
